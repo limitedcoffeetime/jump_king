@@ -21,7 +21,7 @@ class LiveAudioTranslator {
         this.isTranslating = false;
 
         // Settings
-        this.hfToken = localStorage.getItem('hf_token') || '';
+        this.hfToken = localStorage.getItem('hf_token') || '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';
         this.sourceLang = '';  // Auto-detect
         this.targetLang = 'en-US';
 
