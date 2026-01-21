@@ -1,16 +1,18 @@
 #!/usr/bin/env python3
 """
-Startup script for the French Audio Translator application.
+Simple startup script for the Live Audio Translator.
+
+This just serves the static files. All translation logic
+runs in the browser via the HuggingFace Inference API.
 """
 
 import argparse
-import os
 import uvicorn
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description="French Audio Translator - Real-time French to English translation"
+        description="Live Audio Translator - Serve the static web app"
     )
     parser.add_argument(
         "--host",
@@ -24,11 +26,6 @@ def main():
         help="Port to bind to (default: 8000)",
     )
     parser.add_argument(
-        "--mock",
-        action="store_true",
-        help="Use mock translator (for testing without GPU)",
-    )
-    parser.add_argument(
         "--reload",
         action="store_true",
         help="Enable auto-reload for development",
@@ -36,14 +33,10 @@ def main():
 
     args = parser.parse_args()
 
-    if args.mock:
-        os.environ["USE_MOCK_TRANSLATOR"] = "true"
-        print("Running in MOCK mode - no GPU required")
-    else:
-        print("Running with TranslateGemma model")
-
     print(f"Starting server at http://{args.host}:{args.port}")
     print("Open this URL on your phone to use the translator")
+    print("\nNote: You'll need a HuggingFace API token to use translation.")
+    print("Get one free at: https://huggingface.co/settings/tokens")
 
     uvicorn.run(
         "app.main:app",

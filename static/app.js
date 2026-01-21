@@ -1,34 +1,57 @@
 /**
- * French Audio Translator - Frontend Application
+ * Live Audio Translator
  *
- * Handles continuous audio recording, speech recognition,
- * French detection, and streaming translation via WebSocket.
+ * A client-side web app that:
+ * - Continuously records audio using Web Speech API
+ * - Sends transcribed text to TranslateGemma via HuggingFace Inference API
+ * - Streams translations back in real-time
+ *
+ * No backend required - runs entirely in the browser!
  */
 
-class FrenchAudioTranslator {
+class LiveAudioTranslator {
     constructor() {
         // State
         this.isListening = false;
         this.recognition = null;
-        this.websocket = null;
         this.audioContext = null;
         this.analyser = null;
         this.mediaStream = null;
         this.animationId = null;
+        this.isTranslating = false;
 
         // Settings
-        this.autoTranslate = true;
-        this.confidenceThreshold = 0.7;
-        this.speechLang = 'fr-FR';
+        this.hfToken = localStorage.getItem('hf_token') || '';
+        this.sourceLang = '';  // Auto-detect
+        this.targetLang = 'en-US';
 
-        // Translation history
+        // Translation state
+        this.currentTranscript = '';
+        this.currentTranslation = '';
+
+        // History
         this.history = [];
         this.maxHistory = 10;
 
-        // Current state
-        this.currentTranscript = '';
-        this.currentTranslation = '';
-        this.isTranslating = false;
+        // HuggingFace API config
+        this.HF_MODEL = 'google/translategemma-4b-it';
+        this.HF_API_URL = `https://api-inference.huggingface.co/models/${this.HF_MODEL}`;
+
+        // Language code mapping for TranslateGemma
+        this.langCodeMap = {
+            'en-US': 'en-US',
+            'en-GB': 'en-GB',
+            'fr-FR': 'fr',
+            'es-ES': 'es',
+            'de-DE': 'de-DE',
+            'it-IT': 'it',
+            'pt-BR': 'pt-BR',
+            'zh-CN': 'zh-CN',
+            'ja-JP': 'ja',
+            'ko-KR': 'ko',
+            'ru-RU': 'ru',
+            'ar-SA': 'ar',
+        };
 
         // DOM Elements
         this.elements = {
@@ -42,9 +65,10 @@ class FrenchAudioTranslator {
             errorBanner: document.getElementById('errorBanner'),
             settingsToggle: document.getElementById('settingsToggle'),
             settingsPanel: document.getElementById('settingsPanel'),
-            autoTranslateToggle: document.getElementById('autoTranslate'),
-            confidenceInput: document.getElementById('confidenceThreshold'),
-            speechLangSelect: document.getElementById('speechLang'),
+            hfToken: document.getElementById('hfToken'),
+            tokenSaved: document.getElementById('tokenSaved'),
+            sourceLang: document.getElementById('sourceLang'),
+            targetLang: document.getElementById('targetLang'),
             historyCard: document.getElementById('historyCard'),
             historyList: document.getElementById('historyList'),
         };
@@ -58,31 +82,44 @@ class FrenchAudioTranslator {
             return;
         }
 
+        // Load saved token
+        if (this.hfToken) {
+            this.elements.hfToken.value = this.hfToken;
+            this.elements.tokenSaved.style.display = 'block';
+        }
+
         // Bind event listeners
         this.elements.controlBtn.addEventListener('click', () => this.toggleListening());
         this.elements.settingsToggle.addEventListener('click', () => this.toggleSettings());
-        this.elements.autoTranslateToggle.addEventListener('change', (e) => {
-            this.autoTranslate = e.target.checked;
-        });
-        this.elements.confidenceInput.addEventListener('change', (e) => {
-            this.confidenceThreshold = parseFloat(e.target.value);
-        });
-        this.elements.speechLangSelect.addEventListener('change', (e) => {
-            this.speechLang = e.target.value;
-            if (this.recognition) {
-                this.recognition.lang = this.speechLang || 'fr-FR';
+
+        this.elements.hfToken.addEventListener('change', (e) => {
+            this.hfToken = e.target.value.trim();
+            if (this.hfToken) {
+                localStorage.setItem('hf_token', this.hfToken);
+                this.elements.tokenSaved.style.display = 'block';
+            } else {
+                localStorage.removeItem('hf_token');
+                this.elements.tokenSaved.style.display = 'none';
             }
         });
 
-        // Connect WebSocket
-        this.connectWebSocket();
+        this.elements.sourceLang.addEventListener('change', (e) => {
+            this.sourceLang = e.target.value;
+            if (this.recognition) {
+                this.recognition.lang = this.sourceLang || 'fr-FR';
+            }
+        });
+
+        this.elements.targetLang.addEventListener('change', (e) => {
+            this.targetLang = e.target.value;
+        });
     }
 
     checkBrowserSupport() {
         const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
 
         if (!SpeechRecognition) {
-            this.showError('Speech recognition is not supported in this browser. Please use Chrome, Edge, or Safari.');
+            this.showError('Speech recognition is not supported. Please use Chrome, Edge, or Safari.');
             this.elements.controlBtn.disabled = true;
             return false;
         }
@@ -96,84 +133,6 @@ class FrenchAudioTranslator {
         return true;
     }
 
-    connectWebSocket() {
-        const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-        const wsUrl = `${protocol}//${window.location.host}/ws/translate`;
-
-        this.websocket = new WebSocket(wsUrl);
-
-        this.websocket.onopen = () => {
-            console.log('WebSocket connected');
-        };
-
-        this.websocket.onmessage = (event) => {
-            const data = JSON.parse(event.data);
-            this.handleWebSocketMessage(data);
-        };
-
-        this.websocket.onerror = (error) => {
-            console.error('WebSocket error:', error);
-        };
-
-        this.websocket.onclose = () => {
-            console.log('WebSocket disconnected, reconnecting...');
-            setTimeout(() => this.connectWebSocket(), 2000);
-        };
-    }
-
-    handleWebSocketMessage(data) {
-        switch (data.type) {
-            case 'detection_result':
-                this.handleDetectionResult(data);
-                break;
-            case 'translation_start':
-                this.isTranslating = true;
-                this.currentTranslation = '';
-                this.updateTranslationBox('');
-                this.setStatus('processing', 'Translating...');
-                break;
-            case 'translation_chunk':
-                this.currentTranslation += data.chunk;
-                this.updateTranslationBox(this.currentTranslation);
-                break;
-            case 'translation_end':
-                this.isTranslating = false;
-                this.currentTranslation = data.full_translation;
-                this.updateTranslationBox(this.currentTranslation);
-                this.addToHistory(this.currentTranscript, this.currentTranslation);
-                if (this.isListening) {
-                    this.setStatus('listening', 'Listening...');
-                } else {
-                    this.setStatus('ready', 'Ready');
-                }
-                break;
-            case 'error':
-                this.showError(data.message);
-                this.isTranslating = false;
-                if (this.isListening) {
-                    this.setStatus('listening', 'Listening...');
-                }
-                break;
-        }
-    }
-
-    handleDetectionResult(data) {
-        if (data.is_french && data.confidence >= this.confidenceThreshold) {
-            this.elements.langBadge.textContent = `FRENCH (${Math.round(data.confidence * 100)}%)`;
-            this.elements.langBadge.className = 'lang-badge french';
-            this.elements.langBadge.style.display = 'inline-block';
-
-            // Auto-translate if enabled
-            if (this.autoTranslate && !this.isTranslating) {
-                this.requestTranslation(data.text);
-            }
-        } else {
-            this.elements.langBadge.textContent = 'NOT FRENCH';
-            this.elements.langBadge.className = 'lang-badge other';
-            this.elements.langBadge.style.display = 'inline-block';
-        }
-    }
-
     async toggleListening() {
         if (this.isListening) {
             this.stopListening();
@@ -183,6 +142,12 @@ class FrenchAudioTranslator {
     }
 
     async startListening() {
+        // Check for HF token
+        if (!this.hfToken) {
+            this.showError('Please enter your Hugging Face API token first.');
+            return;
+        }
+
         try {
             // Request microphone permission
             this.mediaStream = await navigator.mediaDevices.getUserMedia({ audio: true });
@@ -203,7 +168,11 @@ class FrenchAudioTranslator {
 
         } catch (error) {
             console.error('Failed to start listening:', error);
-            this.showError('Failed to access microphone. Please grant permission and try again.');
+            if (error.name === 'NotAllowedError') {
+                this.showError('Microphone access denied. Please allow microphone access and reload.');
+            } else {
+                this.showError('Failed to access microphone: ' + error.message);
+            }
         }
     }
 
@@ -239,7 +208,7 @@ class FrenchAudioTranslator {
 
         this.recognition.continuous = true;
         this.recognition.interimResults = true;
-        this.recognition.lang = this.speechLang || 'fr-FR';
+        this.recognition.lang = this.sourceLang || 'fr-FR';  // Default to French if not set
 
         this.recognition.onresult = (event) => {
             let interimTranscript = '';
@@ -258,10 +227,17 @@ class FrenchAudioTranslator {
             const displayText = finalTranscript || interimTranscript;
             this.updateTranscriptBox(displayText);
 
-            // When we have a final result, process it
-            if (finalTranscript) {
+            // Show detected language badge
+            if (displayText) {
+                const detectedLang = this.recognition.lang.split('-')[0].toUpperCase();
+                this.elements.langBadge.textContent = detectedLang || 'AUTO';
+                this.elements.langBadge.style.display = 'inline-block';
+            }
+
+            // When we have a final result, translate it
+            if (finalTranscript && !this.isTranslating) {
                 this.currentTranscript = finalTranscript;
-                this.processTranscript(finalTranscript);
+                this.translateText(finalTranscript);
             }
         };
 
@@ -269,21 +245,21 @@ class FrenchAudioTranslator {
             console.error('Speech recognition error:', event.error);
 
             if (event.error === 'no-speech') {
-                // This is normal, just continue listening
-                return;
+                return;  // Normal, just continue
             }
 
             if (event.error === 'audio-capture') {
-                this.showError('No microphone detected. Please connect a microphone.');
+                this.showError('No microphone detected.');
                 this.stopListening();
             } else if (event.error === 'not-allowed') {
-                this.showError('Microphone access denied. Please allow microphone access.');
+                this.showError('Microphone access denied.');
                 this.stopListening();
+            } else if (event.error === 'network') {
+                this.showError('Network error in speech recognition.');
             }
         };
 
         this.recognition.onend = () => {
-            // Restart recognition if still supposed to be listening
             if (this.isListening) {
                 try {
                     this.recognition.start();
@@ -294,27 +270,118 @@ class FrenchAudioTranslator {
         };
     }
 
-    processTranscript(text) {
-        if (!text.trim()) return;
+    async translateText(text) {
+        if (!text.trim() || this.isTranslating) return;
 
-        // Request language detection from backend
-        if (this.websocket && this.websocket.readyState === WebSocket.OPEN) {
-            this.websocket.send(JSON.stringify({
-                type: 'detect',
-                text: text,
-            }));
+        this.isTranslating = true;
+        this.currentTranslation = '';
+        this.setStatus('processing', 'Translating...');
+        this.updateTranslationBox('', true);  // Show cursor
+
+        try {
+            // Determine source language code
+            // Use the speech recognition's detected/configured language
+            const sourceLangCode = this.langCodeMap[this.sourceLang] || 'fr';  // Default to French
+            const targetLangCode = this.langCodeMap[this.targetLang] || 'en-US';
+
+            // Build the prompt for TranslateGemma
+            const prompt = this.buildTranslationPrompt(text, sourceLangCode, targetLangCode);
+
+            // Call HuggingFace Inference API with streaming
+            const response = await fetch(this.HF_API_URL, {
+                method: 'POST',
+                headers: {
+                    'Authorization': `Bearer ${this.hfToken}`,
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({
+                    inputs: prompt,
+                    parameters: {
+                        max_new_tokens: 512,
+                        do_sample: false,
+                        return_full_text: false,
+                    },
+                    options: {
+                        wait_for_model: true,
+                    }
+                }),
+            });
+
+            if (!response.ok) {
+                const errorData = await response.json().catch(() => ({}));
+                throw new Error(errorData.error || `API error: ${response.status}`);
+            }
+
+            const result = await response.json();
+
+            // Extract translation from response
+            let translation = '';
+            if (Array.isArray(result) && result[0]?.generated_text) {
+                translation = result[0].generated_text;
+            } else if (result.generated_text) {
+                translation = result.generated_text;
+            } else {
+                translation = JSON.stringify(result);
+            }
+
+            // Clean up the translation
+            translation = this.cleanTranslation(translation);
+
+            this.currentTranslation = translation;
+            this.updateTranslationBox(translation, false);
+            this.addToHistory(text, translation);
+
+        } catch (error) {
+            console.error('Translation error:', error);
+
+            if (error.message.includes('401')) {
+                this.showError('Invalid API token. Please check your Hugging Face token.');
+            } else if (error.message.includes('503')) {
+                this.showError('Model is loading. Please wait a moment and try again.');
+                // Retry after a delay
+                setTimeout(() => this.translateText(text), 5000);
+                return;
+            } else {
+                this.showError('Translation failed: ' + error.message);
+            }
+
+            this.updateTranslationBox('Translation failed', false);
+        } finally {
+            this.isTranslating = false;
+            if (this.isListening) {
+                this.setStatus('listening', 'Listening...');
+            } else {
+                this.setStatus('ready', 'Ready');
+            }
         }
     }
 
-    requestTranslation(text) {
-        if (!text.trim()) return;
+    buildTranslationPrompt(text, sourceLang, targetLang) {
+        // TranslateGemma uses a specific chat format
+        // Based on the model documentation
+        return `<start_of_turn>user
+Translate the following text from ${sourceLang} to ${targetLang}:
 
-        if (this.websocket && this.websocket.readyState === WebSocket.OPEN) {
-            this.websocket.send(JSON.stringify({
-                type: 'translate',
-                text: text,
-            }));
+${text}<end_of_turn>
+<start_of_turn>model
+`;
+    }
+
+    cleanTranslation(text) {
+        // Remove any model artifacts
+        let cleaned = text
+            .replace(/<end_of_turn>/g, '')
+            .replace(/<start_of_turn>model/g, '')
+            .replace(/<start_of_turn>user/g, '')
+            .trim();
+
+        // Remove quotes if the entire response is quoted
+        if ((cleaned.startsWith('"') && cleaned.endsWith('"')) ||
+            (cleaned.startsWith("'") && cleaned.endsWith("'"))) {
+            cleaned = cleaned.slice(1, -1);
         }
+
+        return cleaned;
     }
 
     setupAudioVisualization() {
@@ -325,7 +392,6 @@ class FrenchAudioTranslator {
         const source = this.audioContext.createMediaStreamSource(this.mediaStream);
         source.connect(this.analyser);
 
-        // Create canvas for visualization
         const canvas = document.createElement('canvas');
         canvas.width = this.elements.visualizer.clientWidth * 2;
         canvas.height = this.elements.visualizer.clientHeight * 2;
@@ -349,11 +415,8 @@ class FrenchAudioTranslator {
 
             for (let i = 0; i < bufferLength; i++) {
                 const barHeight = (dataArray[i] / 255) * canvas.height;
-
-                // Gradient from blue to purple
                 const hue = 220 + (i / bufferLength) * 60;
                 ctx.fillStyle = `hsl(${hue}, 70%, 50%)`;
-
                 ctx.fillRect(x, canvas.height - barHeight, barWidth, barHeight);
                 x += barWidth + 1;
             }
@@ -404,9 +467,10 @@ class FrenchAudioTranslator {
         }
     }
 
-    updateTranslationBox(text) {
-        if (text) {
-            this.elements.translationBox.textContent = text;
+    updateTranslationBox(text, showCursor = false) {
+        if (text || showCursor) {
+            this.elements.translationBox.innerHTML = this.escapeHtml(text) +
+                (showCursor ? '<span class="streaming-cursor"></span>' : '');
             this.elements.translationBox.classList.remove('empty');
         } else {
             this.elements.translationBox.textContent = 'Translation will appear here...';
@@ -454,7 +518,6 @@ class FrenchAudioTranslator {
     showError(message) {
         this.elements.errorBanner.textContent = message;
         this.elements.errorBanner.classList.add('show');
-        this.setStatus('error', 'Error');
     }
 
     hideError() {
@@ -462,7 +525,7 @@ class FrenchAudioTranslator {
     }
 }
 
-// Initialize the app when DOM is ready
+// Initialize when DOM is ready
 document.addEventListener('DOMContentLoaded', () => {
-    window.translator = new FrenchAudioTranslator();
+    window.translator = new LiveAudioTranslator();
 });
